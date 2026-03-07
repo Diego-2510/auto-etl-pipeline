@@ -51,6 +51,9 @@ def _fetch_from_api(symbol: str, period: str, interval: str) -> pd.DataFrame:
             if df.empty:
                 raise ValueError(f"No data returned for {symbol}")
 
+            # Strip timezone - daily OHLCV doesn't need it
+            df.index = df.index.tz_localize(None)
+            
             df.index.name = "date"
             df.columns = [c.lower().replace(" ", "_") for c in df.columns]
 
@@ -88,7 +91,7 @@ def extract_symbol(symbol: str, config: dict) -> pd.DataFrame:
     # Try cache first
     if cache_enabled and _cache_is_valid(path, max_age):
         print(f"  [CACHE HIT] {symbol} → {path}")
-        df = pd.read_csv(path, index_col="date", parse_dates=True)
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
         return df
 
     # Fetch from API
