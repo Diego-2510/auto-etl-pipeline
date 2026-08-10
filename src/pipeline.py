@@ -1,117 +1,165 @@
-"""Pipeline module: Orchestrate ETL with structured logging."""
+from __future__ import annotations
 
+import argparse
 import logging
+import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
-from src.database import get_connection, init_schema
-from src.extractor import load_config, extract_all
-from src.transformer import transform_all
-from src.loader import load_all, print_db_summary
+from src.database import (
+    get_connection,
+    init_schema,
+)
+from src.extractor import (
+    ConfigError,
+    ExtractionError,
+    extract_all,
+    load_config,
+)
+from src.loader import load_all
+from src.transformer import (
+    TransformError,
+    transform_all,
+)
 
 
-def setup_logging(config: dict) -> logging.Logger:
-    """Configure file + console logging.
-    
-    Log format: 2026-03-08 13:25:00 | INFO | Loading 3 symbols...
-    File logs go to logs/pipeline_YYYY-MM-DD.log (one per day).
-    """
-    log_cfg = config.get("logging", {})
-    log_dir = log_cfg.get("directory", "logs/")
-    log_level = log_cfg.get("level", "INFO")
-
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_file = Path(log_dir) / f"pipeline_{today}.log"
-
-    logger = logging.getLogger("etl_pipeline")
-    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-
-    # Avoid duplicate handlers on re-run
-    if logger.handlers:
-        return logger
-
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+def setup_logging(
+    config: dict,
+) -> logging.Logger:
+    logging_cfg = config.get(
+        "logging",
+        {},
     )
 
-    # File handler (append mode – keeps full history per day)
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    level_name = str(
+        logging_cfg.get(
+            "level",
+            "INFO",
+        )
+    ).upper()
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    level = getattr(
+        logging,
+        level_name,
+        logging.INFO,
+    )
+
+    logger = logging.getLogger("auto_etl_pipeline")
+
+    logger.handlers.clear()
+    logger.setLevel(level)
+    logger.propagate = False
+
+    handler = logging.StreamHandler(sys.stdout)
+
+    handler.setLevel(level)
+
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+
+    logger.addHandler(handler)
+
+    log_dir = logging_cfg.get("directory")
+
+    if log_dir:
+        path = Path(str(log_dir))
+
+        path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        file_handler = logging.FileHandler(path / "pipeline.log")
+
+        file_handler.setLevel(level)
+
+        file_handler.setFormatter(handler.formatter)
+
+        logger.addHandler(file_handler)
 
     return logger
 
 
-def run_pipeline(config_path: str = "config.yaml") -> None:
-    """Execute the full ETL pipeline with logging."""
-    config = load_config(config_path)
-    logger = setup_logging(config)
-
-    logger.info("=" * 50)
-    logger.info("ETL Pipeline started")
-    logger.info("=" * 50)
-
-    # --- Extract ---
-    logger.info("Phase 1/3: Extract")
+def run_pipeline(
+    config_path: str | Path = "config.yaml",
+) -> int:
     try:
-        raw_data = extract_all(config)
-        logger.info(f"Extracted {len(raw_data)} symbols")
-    except Exception as e:
-        logger.error(f"Extract failed: {e}")
-        return
+        config = load_config(config_path)
 
-    # --- Transform ---
-    logger.info("Phase 2/3: Transform")
-    try:
-        clean_data = transform_all(raw_data)
-        logger.info(f"Transformed {len(clean_data)}/{len(raw_data)} symbols")
-    except Exception as e:
-        logger.error(f"Transform failed: {e}")
-        return
+        logger = setup_logging(config)
 
-    if not clean_data:
-        logger.warning("No data survived transformation. Aborting load.")
-        return
+        logger.info("ETL pipeline started")
 
-    # --- Load ---
-    logger.info("Phase 3/3: Load")
-    try:
-        db_path = config["database"]["path"]
-        conn = get_connection(db_path)
-        init_schema(conn)
+        raw = extract_all(config)
 
-        summary = load_all(conn, clean_data)
+        clean = transform_all(raw)
 
-        total_inserted = sum(
-            s.get("inserted", 0) for s in summary.values() if "error" not in s
-        )
-        total_skipped = sum(
-            s.get("skipped", 0) for s in summary.values() if "error" not in s
+        conn = get_connection(config["database"]["path"])
+
+        try:
+            init_schema(conn)
+
+            summary = load_all(
+                conn,
+                clean,
+                source="yfinance",
+            )
+
+        finally:
+            conn.close()
+
+        inserted = sum(item["inserted"] for item in summary.values())
+
+        skipped = sum(item["skipped"] for item in summary.values())
+
+        logger.info(
+            "ETL pipeline completed: inserted=%s skipped=%s",
+            inserted,
+            skipped,
         )
 
-        logger.info(f"Load complete: +{total_inserted} inserted, "
-                     f"{total_skipped} skipped")
+        return 0
 
-        print_db_summary(conn)
-        conn.close()
+    except (
+        ConfigError,
+        ExtractionError,
+        TransformError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        logging.getLogger("auto_etl_pipeline").error(
+            "ETL pipeline failed: %s",
+            exc,
+        )
 
-    except Exception as e:
-        logger.error(f"Load failed: {e}")
-        return
+        print(
+            f"error: {exc}",
+            file=sys.stderr,
+        )
 
-    logger.info("ETL Pipeline finished successfully")
+        return 1
+
+
+def parse_args(
+    argv: list[str] | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=("Run the yfinance-to-SQLite ETL pipeline."))
+
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help=("Path to YAML configuration"),
+    )
+
+    return parser.parse_args(argv)
+
+
+def main(
+    argv: list[str] | None = None,
+) -> int:
+    args = parse_args(argv)
+
+    return run_pipeline(args.config)
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    raise SystemExit(main())

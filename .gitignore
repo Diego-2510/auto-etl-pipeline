@@ -1,38 +1,29 @@
-# Data & Cache
-data/
-*.csv
-
-# Database
-*.db
-*.sqlite
-
-# Logs
-logs/
-
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-.eggs/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Environment
-.env
+# Environments
 .venv/
 venv/
-env/
 
-# Config with secrets
+# Local configuration
 config.yaml
+.env
 
-# IDE
+# Runtime data
+data/
+logs/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# Editors / OS
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS
 .DS_Store
-Thumbs.db

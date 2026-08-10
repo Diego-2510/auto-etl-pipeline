@@ -1,23 +1,22 @@
-# Copy to config.yaml and fill in your values
-# config.yaml is gitignored - never commit credentials
-
 database:
   path: "data/market_data.db"
 
 extract:
+  source: "yfinance"
+
   symbols:
     - "AAPL"
     - "MSFT"
     - "BTC-USD"
-  source: "yfinance"          # yfinance | ccxt
-  period: "1y"                 # 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y
-  interval: "1d"               # 1m, 5m, 15m, 1h, 1d, 1wk
+
+  period: "1y"
+  interval: "1d"
 
 cache:
   enabled: true
-  directory: "data/"
+  directory: "data/cache"
   max_age_hours: 24
 
 logging:
   level: "INFO"
-  directory: "logs/"
+  directory: "logs"

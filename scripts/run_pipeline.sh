@@ -1,21 +1,21 @@
-#!/bin/bash
-# run_pipeline.sh - Cron-compatible ETL runner
-#
-# Usage: 
-#   ./scripts/run_pipeline.sh              (default config)
-#   ./scripts/run_pipeline.sh config.yaml  (custom config)
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve project root (one level up from scripts/)
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_DIR="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")/.." &&
+  pwd
+)"
+
 cd "$PROJECT_DIR"
 
-# Activate virtual environment
-source venv/bin/activate
+if [[ ! -x ".venv/bin/python" ]]; then
+  echo "error: .venv not found; create it with: python -m venv .venv" >&2
+  exit 2
+fi
 
-# Run pipeline
-python -m src.pipeline
+CONFIG_PATH="${1:-config.yaml}"
 
-# Exit code forwarding for cron monitoring
-exit $?
+exec \
+  .venv/bin/python \
+  -m src.pipeline \
+  --config "$CONFIG_PATH"

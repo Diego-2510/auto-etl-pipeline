@@ -1,158 +1,279 @@
-# auto-etl-pipeline
+# Auto ETL Pipeline
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Status](https://img.shields.io/badge/Status-Complete-brightgreen)
+A small, reproducible batch ETL pipeline that extracts daily or intraday market data from **yfinance**, validates OHLCV records, and loads them idempotently into SQLite.
 
-Production-style ETL pipeline for financial market data. Extracts OHLCV data via yfinance with CSV caching, validates and transforms with Pandas, and loads into a normalized SQLite database. Cron-automated with structured logging.
+The repository is intentionally narrow in scope. It demonstrates deterministic batch ingestion, validation, retry behavior, transactional loading, duplicate protection, CLI exit codes, and testable failure handling without claiming streaming or multi-provider capabilities that are not implemented.
 
-## Pipeline Architecture
+## Current Scope
 
+Implemented data source:
+
+- `yfinance`
+
+Storage:
+
+- SQLite
+
+Pipeline stages:
+
+1. Extract market data for configured symbols
+2. Reuse a fresh local CSV cache when enabled
+3. Validate and normalize OHLCV records
+4. Load all transformed symbols in one SQLite transaction
+5. Ignore already-loaded `(asset, timestamp, source)` rows
+6. Return a non-zero process exit code on configuration, extraction, transformation, filesystem, or database failure
+
+`ccxt` is intentionally not listed as supported because it is not implemented in this repository.
+
+## Architecture
+
+```text
+config.yaml
+    |
+    v
+Extractor ----> CSV cache
+    |
+    v
+Transformer
+    |
+    v
+Transactional Loader
+    |
+    v
+SQLite
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Extractor  │────▶│  Transformer│────▶│   Loader    │
-│             │     │              │     │             │
-│ yfinance API│     │ Validation   │     │ SQLite DB   │
-│ CSV Cache   │     │ NaN Handling │     │Deduplication│
-│ Exp Backoff │     │ Type Checks  │     │INSERT IGNORE│
-└─────────────┘     └──────────────┘     └─────────────┘
-        │                                        │
-   data/*.csv                            data/market_data.db
-```
 
-## Features
-
-- **Extract**: yfinance API client with exponential backoff retry (3 attempts, 1s/2s delay) and time-based CSV caching
-- **Transform**: Column validation, NaN forward-fill, OHLCV integrity checks (High ≥ Low, prices > 0), type enforcement
-- **Load**: Normalized schema (assets + price_data), `INSERT OR IGNORE` duplicate handling via UNIQUE constraint
-- **Automate**: Cron-compatible bash runner, structured file logging (one log per day)
-- **Config-driven**: YAML configuration with example template, no credentials in repo
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Language | Python 3.10+ |
-| Data Source | yfinance (Yahoo Finance API) |
-| Database | SQLite with WAL mode |
-| Data Processing | Pandas |
-| Config | PyYAML |
-| Scheduling | Cron + Bash |
-| Logging | Python `logging` (file + console) |
-
-## Project Structure
-
-```
-auto-etl-pipeline/
-├── src/
-│   ├── __init__.py
-│   ├── database.py       # Schema, connection, asset management
-│   ├── extractor.py      # API client, CSV caching, retry logic
-│   ├── transformer.py    # Validation, cleaning, type enforcement
-│   ├── loader.py         # DB insertion, duplicate handling
-│   └── pipeline.py       # ETL orchestrator with logging
-├── scripts/
-│   └── run_pipeline.sh   # Cron-compatible runner
-├── config_example.yaml   # Template config (no credentials)
-├── requirements.txt
-├── LICENSE
-└── README.md
-```
+The pipeline separates extraction, transformation, persistence, and orchestration so each behavior can be tested independently.
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/Diego-2510/auto-etl-pipeline.git
 cd auto-etl-pipeline
 
-# Setup
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
 
-# Configure
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
 cp config_example.yaml config.yaml
-
-# Run
-python -m src.pipeline
+python -m src.pipeline --config config.yaml
 ```
 
-### Expected Output
+A successful run returns exit code `0`.
 
+Expected failures return a non-zero exit code, which makes the command suitable for cron or another scheduler that relies on process status.
+
+## Configuration
+
+Example:
+
+```yaml
+database:
+  path: "data/market_data.db"
+
+extract:
+  source: "yfinance"
+  symbols:
+    - "AAPL"
+    - "MSFT"
+    - "BTC-USD"
+  period: "1y"
+  interval: "1d"
+
+cache:
+  enabled: true
+  directory: "data/cache"
+  max_age_hours: 24
+
+logging:
+  level: "INFO"
+  directory: "logs"
 ```
-2026-03-08 13:27:52 | INFO     | ETL Pipeline started
-2026-03-08 13:27:52 | INFO     | Phase 1/3: Extract
-2026-03-08 13:27:52 | INFO     | Extracted 3 symbols
-2026-03-08 13:27:52 | INFO     | Phase 2/3: Transform
-2026-03-08 13:27:52 | INFO     | Transformed 3/3 symbols
-2026-03-08 13:27:52 | INFO     | Phase 3/3: Load
-2026-03-08 13:27:52 | INFO     | Load complete: +868 inserted, 0 skipped
-2026-03-08 13:27:52 | INFO     | ETL Pipeline finished successfully
+
+`extract.source` currently accepts only `yfinance`.
+
+## Data Validation
+
+The transformation stage requires:
+
+- a `DatetimeIndex`
+- `open`, `high`, `low`, `close`, and `volume`
+- finite numeric OHLCV values
+- strictly positive prices
+- non-negative integral volume
+- `high >= max(open, close, low)`
+- `low <= min(open, close, high)`
+
+Invalid rows are removed when row-level integrity checks fail.
+
+If no valid rows remain for a symbol, the transformation fails rather than silently loading an empty result.
+
+Missing OHLCV values are not forward-filled. This avoids inventing market observations in the cleanup layer.
+
+## Idempotency
+
+SQLite enforces:
+
+```text
+UNIQUE(asset_id, date, source)
 ```
 
-## Cron Setup
-
-Schedule daily runs after US market close (23:00 CET):
-
-```bash
-crontab -e
-# Add:
-0 23 * * * /path/to/auto-etl-pipeline/scripts/run_pipeline.sh >> /path/to/auto-etl-pipeline/logs/cron.log 2>&1
-```
-
-## SQL Query Examples
-
-After running the pipeline, query the database directly:
+The loader uses:
 
 ```sql
--- Recent AAPL closing prices
-SELECT p.date, p.close, p.volume
-FROM price_data p
-JOIN assets a ON p.asset_id = a.id
-WHERE a.symbol = 'AAPL'
-ORDER BY p.date DESC
-LIMIT 5;
-
--- All assets with row counts
-SELECT a.symbol, a.asset_type, COUNT(p.id) as rows,
-       MIN(p.date) as first_date, MAX(p.date) as last_date
-FROM assets a
-LEFT JOIN price_data p ON a.id = p.asset_id
-GROUP BY a.id;
-
--- Daily return for a symbol
-SELECT date, close,
-       ROUND((close - LAG(close) OVER (ORDER BY date)) / LAG(close) OVER (ORDER BY date) * 100, 2) as return_pct
-FROM price_data
-WHERE asset_id = (SELECT id FROM assets WHERE symbol = 'AAPL')
-ORDER BY date DESC
-LIMIT 10;
+ON CONFLICT(asset_id, date, source) DO NOTHING
 ```
 
-Run queries via CLI:
+Running the same transformed input twice therefore does not insert duplicate price rows.
+
+The integration test executes the same load twice against a temporary SQLite database and verifies that the second run reports the row as skipped.
+
+## Transaction Semantics
+
+All symbols in one `load_all(...)` invocation are loaded inside one explicit SQLite transaction.
+
+If loading any symbol fails:
+
+```text
+ROLLBACK
+```
+
+is executed and no partially loaded batch is committed.
+
+This is stronger than committing each symbol independently because a failed scheduled run cannot leave a partially persisted batch while still appearing complete.
+
+## Cache Behavior
+
+Cache files include both symbol and interval:
+
+```text
+AAPL_1d.csv
+BTC-USD_1h.csv
+```
+
+This prevents data collected at different intervals from accidentally sharing the same cache filename.
+
+A stale or missing cache triggers an API fetch.
+
+## CLI
+
+Run directly:
+
 ```bash
-sqlite3 data/market_data.db "SELECT a.symbol, COUNT(*) FROM assets a JOIN price_data p ON a.id = p.asset_id GROUP BY a.id;"
+python -m src.pipeline --config config.yaml
 ```
 
-## Design Rationale
+Or use the cron-compatible shell wrapper:
 
-**Normalized Schema** — Assets and price data are separated (2NF) to avoid repeating symbol/type metadata across thousands of OHLCV rows. A UNIQUE constraint on `(asset_id, date, source)` provides database-level deduplication.
+```bash
+./scripts/run_pipeline.sh
+```
 
-**Forward-Fill over Interpolation** — Missing values are filled using the previous day's price rather than interpolation. Interpolation creates synthetic data points that never existed, which would distort downstream analysis (e.g., backtesting). Forward-fill is the conservative, industry-standard approach.
+Custom configuration:
 
-**CSV Cache Layer** — Reduces API calls during development and provides fallback data if the API is temporarily unavailable. Cache age is configurable via `max_age_hours`.
+```bash
+./scripts/run_pipeline.sh config_example.yaml
+```
 
-**INSERT OR IGNORE** — Chosen over INSERT OR REPLACE because historical OHLCV data does not change after market close. Idempotent re-runs are safe without risk of overwriting valid data.
+The wrapper expects the virtual environment at:
 
-## Limitations
+```text
+.venv/
+```
 
-- **Daily data only**: Intraday intervals (1m, 5m) are not tested with the current caching strategy
-- **yfinance dependency**: Relies on Yahoo Finance unofficial API; may break on upstream changes
-- **Single-threaded**: Symbols are fetched sequentially; parallel extraction could improve performance
-- **No alerting**: Pipeline failures are logged but do not trigger notifications
+## Tests
+
+Install development dependencies:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+Run:
+
+```bash
+python -m ruff format --check .
+python -m ruff check .
+python -m compileall -q src tests
+python -m pytest
+python -m pip_audit -r requirements.txt
+```
+
+The tests cover:
+
+- configuration validation
+- rejection of unimplemented providers
+- cache naming and freshness
+- cache reads and cache writes
+- transformation of valid OHLCV data
+- invalid OHLCV rows
+- missing columns
+- fractional volume
+- SQLite schema initialization
+- idempotent duplicate loading
+- transaction rollback
+- pipeline success
+- pipeline non-zero failure status
+- CLI argument parsing
+
+## Project Structure
+
+```text
+auto-etl-pipeline/
+├── .github/
+│   ├── dependabot.yml
+│   └── workflows/
+│       └── ci.yml
+├── scripts/
+│   └── run_pipeline.sh
+├── src/
+│   ├── __init__.py
+│   ├── database.py
+│   ├── extractor.py
+│   ├── loader.py
+│   ├── pipeline.py
+│   └── transformer.py
+├── tests/
+│   ├── test_extractor.py
+│   ├── test_loader.py
+│   ├── test_pipeline.py
+│   └── test_transformer.py
+├── config_example.yaml
+├── pyproject.toml
+├── requirements.txt
+├── requirements-dev.txt
+├── .gitignore
+├── LICENSE
+└── README.md
+```
+
+## Known Limitations
+
+- yfinance is the only implemented provider.
+- The pipeline is batch-oriented, not streaming.
+- SQLite is appropriate for the scope of this repository but is not presented as a distributed data platform.
+- Provider availability and upstream schema changes remain external failure modes.
+- The cache is local-filesystem based.
+- There is no incremental watermark or late-event model.
+- There is no schema registry.
+- There is no orchestration service beyond the CLI/shell runner.
+
+Those capabilities belong in a future dedicated data-platform project rather than being implied here without implementation.
+
+## CI
+
+GitHub Actions runs on Python 3.12 and 3.13 and checks:
+
+- Ruff formatting
+- Ruff linting
+- bytecode compilation
+- pytest with coverage
+- dependency vulnerability audit
+
+Dependabot monitors Python and GitHub Actions dependencies.
 
 ## License
 
-[MIT](LICENSE)
+MIT. See [`LICENSE`](LICENSE).
